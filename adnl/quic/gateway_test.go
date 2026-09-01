@@ -23,6 +23,61 @@ func startGateway(t *testing.T, g *Gateway) string {
 	return pc.LocalAddr().String()
 }
 
+func TestGatewayConfigBoundsIncomingStreamsAndObjects(t *testing.T) {
+	key := mustKey(t)
+	configured, err := NewGatewayWithConfig(GatewayConfig{
+		MaxObjectSize: 64, MaxIncomingStreams: 4,
+	}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configured.maxObjSize != 64 || configured.maxStreams != 4 {
+		t.Fatalf("gateway limits = %d/%d, want 64/4", configured.maxObjSize, configured.maxStreams)
+	}
+	if _, err := NewGatewayWithConfig(GatewayConfig{MaxObjectSize: 7}, key); err == nil {
+		t.Fatal("undersized object limit was accepted")
+	}
+	if _, err := NewGatewayWithConfig(GatewayConfig{MaxIncomingStreams: defaultMaxIncomingStreams + 1}, key); err == nil {
+		t.Fatal("oversized stream limit was accepted")
+	}
+}
+
+func TestGatewayObjectLimitAppliesBeforeQueryHandler(t *testing.T) {
+	serverKey, clientKey := mustKey(t), mustKey(t)
+	server, err := NewGatewayWithConfig(GatewayConfig{
+		MaxObjectSize: 64, MaxIncomingStreams: 4,
+	}, serverKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var handled atomic.Int32
+	server.SetConnectionHandler(func(peer *Peer) error {
+		peer.SetQueryHandler(func(context.Context, []byte) ([]byte, error) {
+			handled.Add(1)
+			return nil, nil
+		})
+		return nil
+	})
+	addr := startGateway(t, server)
+	client, err := NewGateway(clientKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	peer, err := client.DialDefault(ctx, server.PublicKey(), addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := peer.Query(ctx, make([]byte, 128), 0); err == nil {
+		t.Fatal("oversized query was accepted")
+	}
+	if handled.Load() != 0 {
+		t.Fatal("oversized query reached the application handler")
+	}
+}
+
 func TestGatewayQueryReusesPath(t *testing.T) {
 	serverKey := mustKey(t)
 	clientKey := mustKey(t)

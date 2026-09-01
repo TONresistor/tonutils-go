@@ -385,10 +385,17 @@ func Dial(ctx context.Context, addr string, localKey ed25519.PrivateKey, expecte
 		return nil, err
 	}
 
-	return dialIdentity(ctx, addr, local, expectedPeer)
+	return dialIdentity(ctx, addr, local, expectedPeer, DefaultMaxObjectSize, defaultMaxIncomingStreams)
 }
 
-func dialIdentity(ctx context.Context, addr string, local Identity, expectedPeer ed25519.PublicKey) (*Client, error) {
+func dialIdentity(
+	ctx context.Context,
+	addr string,
+	local Identity,
+	expectedPeer ed25519.PublicKey,
+	maxObjectSize int64,
+	maxIncomingStreams int64,
+) (*Client, error) {
 	expectedPeerID, err := idFromPublicKey(expectedPeer)
 	if err != nil {
 		return nil, err
@@ -411,7 +418,9 @@ func dialIdentity(ctx context.Context, addr string, local Identity, expectedPeer
 		},
 	}
 
-	conn, err := quicgo.DialAddr(ctx, addr, tlsConf, defaultQUICConfig())
+	quicConfig := defaultQUICConfig()
+	quicConfig.MaxIncomingStreams = maxIncomingStreams
+	conn, err := quicgo.DialAddr(ctx, addr, tlsConf, quicConfig)
 	if err != nil {
 		return nil, fmt.Errorf("quic: dial %s: %w", addr, err)
 	}
@@ -427,7 +436,7 @@ func dialIdentity(ctx context.Context, addr string, local Identity, expectedPeer
 		return nil, fmt.Errorf("quic: connected peer %s != expected %s", peer, expectedPeerID)
 	}
 
-	return clientFromConn(conn, peerKey, peer, DefaultMaxObjectSize), nil
+	return clientFromConn(conn, peerKey, peer, maxObjectSize), nil
 }
 
 func clientFromConn(conn *quicgo.Conn, peerKey ed25519.PublicKey, peer adnlID, maxObjectSize int64) *Client {

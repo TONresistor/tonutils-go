@@ -35,12 +35,20 @@ type pathKey struct {
 	peer  adnlID
 }
 
+// GatewayConfig bounds the TL objects and bidirectional streams accepted by a Gateway.
+// Zero values select the TON node defaults.
+type GatewayConfig struct {
+	MaxObjectSize      int64
+	MaxIncomingStreams int64
+}
+
 // Gateway manages TON QUIC peers keyed by (local ADNL id, peer ADNL id).
 type Gateway struct {
 	defaultID  Identity
 	ids        []Identity
 	byID       map[adnlID]Identity
 	maxObjSize int64
+	maxStreams int64
 
 	mu     sync.RWMutex
 	peers  map[pathKey]*Peer
@@ -51,14 +59,32 @@ type Gateway struct {
 
 // NewGateway builds a Gateway hosting the given local Ed25519 identities.
 func NewGateway(keys ...ed25519.PrivateKey) (*Gateway, error) {
+	return NewGatewayWithConfig(GatewayConfig{}, keys...)
+}
+
+// NewGatewayWithConfig builds a Gateway with explicit resource limits.
+func NewGatewayWithConfig(config GatewayConfig, keys ...ed25519.PrivateKey) (*Gateway, error) {
 	if len(keys) == 0 {
 		return nil, errors.New("quic: at least one identity key is required")
+	}
+	if config.MaxObjectSize == 0 {
+		config.MaxObjectSize = DefaultMaxObjectSize
+	}
+	if config.MaxObjectSize < 8 || config.MaxObjectSize > DefaultMaxObjectSize {
+		return nil, fmt.Errorf("quic: max object size must be between 8 and %d bytes", DefaultMaxObjectSize)
+	}
+	if config.MaxIncomingStreams == 0 {
+		config.MaxIncomingStreams = defaultMaxIncomingStreams
+	}
+	if config.MaxIncomingStreams < 1 || config.MaxIncomingStreams > defaultMaxIncomingStreams {
+		return nil, fmt.Errorf("quic: max incoming streams must be between 1 and %d", defaultMaxIncomingStreams)
 	}
 
 	g := &Gateway{
 		ids:        make([]Identity, 0, len(keys)),
 		byID:       make(map[adnlID]Identity, len(keys)),
-		maxObjSize: DefaultMaxObjectSize,
+		maxObjSize: config.MaxObjectSize,
+		maxStreams: config.MaxIncomingStreams,
 		peers:      make(map[pathKey]*Peer),
 	}
 	for i, key := range keys {
@@ -117,6 +143,7 @@ func (g *Gateway) Serve(pc net.PacketConn) error {
 		return err
 	}
 	srv.maxObjectSize = g.maxObjSize
+	srv.quicConf.MaxIncomingStreams = g.maxStreams
 
 	g.mu.Lock()
 	if g.server != nil {
@@ -172,7 +199,7 @@ func (g *Gateway) Dial(ctx context.Context, local, peer ed25519.PublicKey, addr 
 		return p, nil
 	}
 
-	client, err := dialIdentity(ctx, addr, id, peer)
+	client, err := dialIdentity(ctx, addr, id, peer, g.maxObjSize, g.maxStreams)
 	if err != nil {
 		p.dialMu.Unlock()
 		if created {
